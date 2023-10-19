@@ -20,13 +20,16 @@
 use super::*;
 use crate as pallet_assets;
 
-use codec::Encode;
+use codec::{Decode, Encode, MaxEncodedLen};
 use frame_support::{
 	construct_runtime, derive_impl, parameter_types,
 	traits::{AsEnsureOriginWithArg, ConstU32},
 };
 use sp_io::storage;
-use sp_runtime::BuildStorage;
+use sp_runtime::{
+	traits::{BlakeTwo256, IdentityLookup},
+	BuildStorage, RuntimeDebug,
+};
 
 type Block = frame_system::mocking::MockBlock<Test>;
 
@@ -97,6 +100,25 @@ impl AssetsCallbackHandle {
 	}
 }
 
+#[derive(
+	Encode,
+	Decode,
+	Copy,
+	Clone,
+	Eq,
+	PartialEq,
+	Ord,
+	PartialOrd,
+	MaxEncodedLen,
+	TypeInfo,
+	RuntimeDebug,
+)]
+pub enum TestId {
+	Foo,
+	Bar,
+	Baz,
+}
+
 #[derive_impl(crate::config_preludes::TestDefaultConfig)]
 impl Config for Test {
 	type Currency = Balances;
@@ -104,6 +126,12 @@ impl Config for Test {
 	type ForceOrigin = frame_system::EnsureRoot<u64>;
 	type Freezer = TestFreezer;
 	type CallbackHandle = (AssetsCallbackHandle, AutoIncAssetId<Test>);
+	type Extra = ();
+	type RemoveItemsLimit = ConstU32<5>;
+	type MaxHolds = ConstU32<10>;
+	type RuntimeHoldReason = TestId;
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = ();
 }
 
 use std::collections::HashMap;

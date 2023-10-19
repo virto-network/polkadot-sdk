@@ -292,6 +292,8 @@ pub mod pallet {
 			type Extra = ();
 			type CallbackHandle = ();
 			type WeightInfo = ();
+			type RuntimeHoldReason = ();
+			type MaxHolds = ConstU32<10>;
 			#[cfg(feature = "runtime-benchmarks")]
 			type BenchmarkHelper = ();
 		}
@@ -346,6 +348,8 @@ pub mod pallet {
 			Success = Self::AccountId,
 		>;
 
+		type RuntimeHoldReason: Parameter + Member + MaxEncodedLen + Copy;
+
 		/// The origin which may forcibly create or destroy an asset or otherwise alter privileged
 		/// attributes.
 		#[pallet::no_default]
@@ -381,6 +385,10 @@ pub mod pallet {
 		/// The maximum length of a name or symbol stored on-chain.
 		#[pallet::constant]
 		type StringLimit: Get<u32>;
+
+		/// The maximum number of holds that can exist on an account at any time.
+		#[pallet::constant]
+		type MaxHolds: Get<u32>;
 
 		/// A hook to allow a per-asset, per-account minimum balance to be enforced. This must be
 		/// respected in all permissionless operations.
@@ -461,6 +469,18 @@ pub mod pallet {
 	/// [SetNextAssetId](`migration::next_asset_id::SetNextAssetId`) migration.
 	#[pallet::storage]
 	pub type NextAssetId<T: Config<I>, I: 'static = ()> = StorageValue<_, T::AssetId, OptionQuery>;
+
+	/// Holds on account balances.
+	#[pallet::storage]
+	pub type Holds<T: Config<I>, I: 'static = ()> = StorageDoubleMap<
+		_,
+		Blake2_128Concat,
+		T::AccountId,
+		Blake2_128Concat,
+		T::AssetId,
+		BoundedVec<IdAmount<T::RuntimeHoldReason, T::Balance>, T::MaxHolds>,
+		ValueQuery,
+	>;
 
 	#[pallet::genesis_config]
 	#[derive(frame_support::DefaultNoBound)]
@@ -682,6 +702,10 @@ pub mod pallet {
 		CallbackFailed,
 		/// The asset ID must be equal to the [`NextAssetId`].
 		BadAssetId,
+		/// Number of holds exceed `MaxHolds`
+		TooManyHolds,
+		/// Error to update holds
+		HoldsNotUpdated,
 	}
 
 	#[pallet::call(weight(<T as Config<I>>::WeightInfo))]
@@ -1184,7 +1208,7 @@ pub mod pallet {
 				ensure!(details.status == AssetStatus::Live, Error::<T, I>::AssetNotLive);
 				ensure!(origin == details.owner, Error::<T, I>::NoPermission);
 				if details.owner == owner {
-					return Ok(())
+					return Ok(());
 				}
 
 				let metadata_deposit = Metadata::<T, I>::get(&id).deposit;

@@ -87,6 +87,8 @@ impl pallet_assets::Config<Instance1> for Test {
 	type Extra = ();
 	type WeightInfo = ();
 	type CallbackHandle = ();
+	type MaxHolds = ConstU32<50>;
+	type RuntimeHoldReason = RuntimeHoldReason;
 	pallet_assets::runtime_benchmarks_enabled! {
 		type BenchmarkHelper = ();
 	}
@@ -112,6 +114,8 @@ impl pallet_assets::Config<Instance2> for Test {
 	type Extra = ();
 	type WeightInfo = ();
 	type CallbackHandle = ();
+	type MaxHolds = ConstU32<50>;
+	type RuntimeHoldReason = RuntimeHoldReason;
 	pallet_assets::runtime_benchmarks_enabled! {
 		type BenchmarkHelper = ();
 	}
