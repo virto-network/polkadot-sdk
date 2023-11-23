@@ -226,7 +226,9 @@ impl<T: Config<I>, I: 'static> Destroy<<T as SystemConfig>::AccountId> for Palle
 	}
 }
 
-impl<T: Config<I>, I: 'static> Mutate<<T as SystemConfig>::AccountId, ItemConfig> for Pallet<T, I> {
+impl<T: Config<I>, I: 'static> Mutate<<T as SystemConfig>::AccountId> for Pallet<T, I> {
+	type ItemConfig = ItemConfig;
+
 	fn mint_into(
 		collection: &Self::CollectionId,
 		item: &Self::ItemId,
@@ -255,7 +257,7 @@ impl<T: Config<I>, I: 'static> Mutate<<T as SystemConfig>::AccountId, ItemConfig
 		Self::do_burn(*collection, *item, |d| {
 			if let Some(check_owner) = maybe_check_owner {
 				if &d.owner != check_owner {
-					return Err(Error::<T, I>::NoPermission.into())
+					return Err(Error::<T, I>::NoPermission.into());
 				}
 			}
 			Ok(())
@@ -286,7 +288,7 @@ impl<T: Config<I>, I: 'static> Mutate<<T as SystemConfig>::AccountId, ItemConfig
 	) -> DispatchResult {
 		key.using_encoded(|k| {
 			value.using_encoded(|v| {
-				<Self as Mutate<T::AccountId, ItemConfig>>::set_attribute(collection, item, k, v)
+				<Self as Mutate<T::AccountId>>::set_attribute(collection, item, k, v)
 			})
 		})
 	}
@@ -313,9 +315,7 @@ impl<T: Config<I>, I: 'static> Mutate<<T as SystemConfig>::AccountId, ItemConfig
 	) -> DispatchResult {
 		key.using_encoded(|k| {
 			value.using_encoded(|v| {
-				<Self as Mutate<T::AccountId, ItemConfig>>::set_collection_attribute(
-					collection, k, v,
-				)
+				<Self as Mutate<T::AccountId>>::set_collection_attribute(collection, k, v)
 			})
 		})
 	}
@@ -339,9 +339,7 @@ impl<T: Config<I>, I: 'static> Mutate<<T as SystemConfig>::AccountId, ItemConfig
 		item: &Self::ItemId,
 		key: &K,
 	) -> DispatchResult {
-		key.using_encoded(|k| {
-			<Self as Mutate<T::AccountId, ItemConfig>>::clear_attribute(collection, item, k)
-		})
+		key.using_encoded(|k| <Self as Mutate<T::AccountId>>::clear_attribute(collection, item, k))
 	}
 
 	fn clear_collection_attribute(collection: &Self::CollectionId, key: &[u8]) -> DispatchResult {
@@ -359,7 +357,7 @@ impl<T: Config<I>, I: 'static> Mutate<<T as SystemConfig>::AccountId, ItemConfig
 		key: &K,
 	) -> DispatchResult {
 		key.using_encoded(|k| {
-			<Self as Mutate<T::AccountId, ItemConfig>>::clear_collection_attribute(collection, k)
+			<Self as Mutate<T::AccountId>>::clear_collection_attribute(collection, k)
 		})
 	}
 }
@@ -378,10 +376,10 @@ impl<T: Config<I>, I: 'static> Transfer<T::AccountId> for Pallet<T, I> {
 			Self::has_system_attribute(&collection, &item, PalletAttributes::TransferDisabled)?;
 		// Can't lock the item twice
 		if transfer_disabled {
-			return Err(Error::<T, I>::ItemLocked.into())
+			return Err(Error::<T, I>::ItemLocked.into());
 		}
 
-		<Self as Mutate<T::AccountId, ItemConfig>>::set_attribute(
+		<Self as Mutate<T::AccountId>>::set_attribute(
 			collection,
 			item,
 			&PalletAttributes::<Self::CollectionId>::TransferDisabled.encode(),
@@ -390,7 +388,7 @@ impl<T: Config<I>, I: 'static> Transfer<T::AccountId> for Pallet<T, I> {
 	}
 
 	fn enable_transfer(collection: &Self::CollectionId, item: &Self::ItemId) -> DispatchResult {
-		<Self as Mutate<T::AccountId, ItemConfig>>::clear_attribute(
+		<Self as Mutate<T::AccountId>>::clear_attribute(
 			collection,
 			item,
 			&PalletAttributes::<Self::CollectionId>::TransferDisabled.encode(),

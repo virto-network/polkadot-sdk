@@ -983,6 +983,84 @@ fn set_collection_owner_attributes_should_work() {
 }
 
 #[test]
+fn set_collection_system_attributes_should_work() {
+	new_test_ext().execute_with(|| {
+		Balances::make_free_balance_be(&account(1), 100);
+
+		assert_ok!(Nfts::force_create(
+			RuntimeOrigin::root(),
+			account(1),
+			collection_config_with_all_settings_enabled()
+		));
+		assert_ok!(Nfts::mint(RuntimeOrigin::signed(account(1)), 0, 0, account(1), None));
+
+		let collection_id = 0;
+		let attribute_key = [0u8];
+		let attribute_value = [0u8];
+
+		assert_ok!(<Nfts as Mutate<AccountIdOf<Test>>>::set_collection_attribute(
+			&collection_id,
+			&attribute_key,
+			&attribute_value
+		));
+
+		assert_eq!(attributes(0), vec![(None, AttributeNamespace::Pallet, bvec![0], bvec![0])]);
+
+		assert_eq!(
+			<Nfts as Inspect<AccountIdOf<Test>>>::system_attribute(
+				&collection_id,
+				None,
+				&attribute_key
+			),
+			Some(attribute_value.to_vec())
+		);
+
+		// test typed system attribute
+		let typed_attribute_key = [0u8; 32];
+		#[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug)]
+		struct TypedAttributeValue(u32);
+		let typed_attribute_value = TypedAttributeValue(42);
+
+		assert_ok!(<Nfts as Mutate<AccountIdOf<Test>>>::set_typed_collection_attribute(
+			&collection_id,
+			&typed_attribute_key,
+			&typed_attribute_value
+		));
+
+		assert_eq!(
+			<Nfts as Inspect<AccountIdOf<Test>>>::typed_system_attribute(
+				&collection_id,
+				None,
+				&typed_attribute_key
+			),
+			Some(typed_attribute_value)
+		);
+
+		// check storage
+		assert_eq!(
+			attributes(collection_id),
+			[
+				(None, AttributeNamespace::Pallet, bvec![0], bvec![0]),
+				(
+					None,
+					AttributeNamespace::Pallet,
+					bvec![
+						0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+						0, 0, 0, 0, 0, 0, 0
+					],
+					bvec![42, 0, 0, 0]
+				)
+			]
+		);
+
+		assert_ok!(Nfts::burn(RuntimeOrigin::root(), collection_id, 0));
+		let w = Nfts::get_destroy_witness(&0).unwrap();
+		assert_ok!(Nfts::destroy(RuntimeOrigin::signed(account(1)), collection_id, w));
+		assert_eq!(attributes(collection_id), vec![]);
+	})
+}
+
+#[test]
 fn set_item_owner_attributes_should_work() {
 	new_test_ext().execute_with(|| {
 		Balances::make_free_balance_be(&account(1), 100);
@@ -1304,7 +1382,7 @@ fn validate_deposit_required_setting() {
 			bvec![2],
 			bvec![0],
 		));
-		assert_ok!(<Nfts as Mutate<<Test as SystemConfig>::AccountId, ItemConfig>>::set_attribute(
+		assert_ok!(<Nfts as Mutate<<Test as SystemConfig>::AccountId>>::set_attribute(
 			&0,
 			&0,
 			&[3],
@@ -1323,13 +1401,11 @@ fn validate_deposit_required_setting() {
 		assert_eq!(Balances::reserved_balance(account(2)), 3);
 		assert_eq!(Balances::reserved_balance(account(3)), 3);
 
-		assert_ok!(
-			<Nfts as Mutate<<Test as SystemConfig>::AccountId, ItemConfig>>::clear_attribute(
-				&0,
-				&0,
-				&[3],
-			)
-		);
+		assert_ok!(<Nfts as Mutate<<Test as SystemConfig>::AccountId>>::clear_attribute(
+			&0,
+			&0,
+			&[3],
+		));
 		assert_eq!(
 			attributes(0),
 			vec![
@@ -2998,9 +3074,9 @@ fn collection_locking_should_work() {
 
 		let stored_config = CollectionConfigOf::<Test>::get(collection_id).unwrap();
 		let full_lock_config = collection_config_from_disabled_settings(
-			CollectionSetting::TransferableItems |
-				CollectionSetting::UnlockedMetadata |
-				CollectionSetting::UnlockedAttributes,
+			CollectionSetting::TransferableItems
+				| CollectionSetting::UnlockedMetadata
+				| CollectionSetting::UnlockedAttributes,
 		);
 		assert_eq!(stored_config, full_lock_config);
 	});

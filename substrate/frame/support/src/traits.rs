@@ -31,13 +31,13 @@ pub use tokens::{
 };
 
 mod members;
-#[allow(deprecated)]
-pub use members::{AllowAll, DenyAll, Filter};
 pub use members::{
-	AsContains, ChangeMembers, Contains, ContainsLengthBound, ContainsPair, Everything,
+	membership, AsContains, ChangeMembers, Contains, ContainsLengthBound, ContainsPair, Everything,
 	EverythingBut, FromContainsPair, InitializeMembers, InsideBoth, IsInVec, Nothing,
 	RankedMembers, SortedMembers, TheseExcept,
 };
+#[allow(deprecated)]
+pub use members::{AllowAll, DenyAll, Filter};
 
 mod validation;
 pub use validation::{
