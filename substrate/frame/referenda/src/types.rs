@@ -114,7 +114,7 @@ pub struct Deposit<AccountId, Balance> {
 pub const DEFAULT_MAX_TRACK_NAME_LEN: usize = 25;
 
 /// Detailed information about the configuration of a referenda track
-#[derive(Clone, Encode, Decode, MaxEncodedLen, TypeInfo)]
+#[derive(Clone, Encode, Decode, MaxEncodedLen, TypeInfo, Debug, PartialEq)]
 pub struct TrackInfo<Balance, Moment, const N: usize = DEFAULT_MAX_TRACK_NAME_LEN> {
 	/// Name of this track.
 	pub name: [u8; N],
