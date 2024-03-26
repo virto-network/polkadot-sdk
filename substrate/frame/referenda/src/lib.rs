@@ -628,7 +628,10 @@ pub mod pallet {
 			ensure_root(origin)?;
 			let now = frame_system::Pallet::<T>::block_number();
 
-			let mut status = Self::ensure_ongoing(index)?;
+			let mut status = match ReferendumInfoFor::<T, I>::get(index) {
+				Some(ReferendumInfo::Ongoing(status)) => Ok(status),
+				_ => Err(Error::<T, I>::NotOngoing),
+			}?;
 			// This is our wake-up, so we can disregard the alarm.
 			status.alarm = None;
 			let (info, dirty, branch) = Self::service_referendum(now, index, status);
@@ -762,7 +765,7 @@ impl<T: Config<I>, I: 'static> Polling<T::Tally> for Pallet<T, I> {
 					.clone()
 					.deciding
 					.map(|d| d.confirming.map(|x| now >= x).unwrap_or(false))
-					.unwrap();
+					.unwrap_or(false);
 				if is_finalizing {
 					return f(PollStatus::None);
 				}
@@ -791,7 +794,7 @@ impl<T: Config<I>, I: 'static> Polling<T::Tally> for Pallet<T, I> {
 					.clone()
 					.deciding
 					.map(|d| d.confirming.map(|x| now >= x).unwrap_or(false))
-					.unwrap();
+					.unwrap_or(false);
 				if is_finalizing {
 					return f(PollStatus::None);
 				}

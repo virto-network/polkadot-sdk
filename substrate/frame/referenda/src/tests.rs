@@ -58,14 +58,14 @@ fn basic_happy_path_works() {
 		run_to(7);
 		assert_eq!(confirming_until(0), 9);
 		run_to(10);
-		// #8: Should be confirmed & ended.
+		// #10: Should confirm via auction.
 		assert_eq!(approved_since(0), 10);
 		assert_ok!(Referenda::refund_decision_deposit(RuntimeOrigin::signed(2), 0));
 		run_to(13);
-		// #9: Should not yet be enacted.
+		// #13: Should not yet be enacted.
 		assert_eq!(Balances::free_balance(&42), 0);
 		run_to(14);
-		// #10: Proposal should be executed.
+		// #14: Proposal should be executed.
 		assert_eq!(Balances::free_balance(&42), 1);
 	});
 }
