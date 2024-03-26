@@ -628,22 +628,10 @@ pub mod pallet {
 			ensure_root(origin)?;
 			let now = frame_system::Pallet::<T>::block_number();
 
-			let info = ReferendumInfoFor::<T, I>::get(index);
-
-			let (info, dirty, branch) = match info {
-				Some(ReferendumInfo::Ongoing(mut status)) => {
-					// This is our wake-up, so we can disregard the alarm.
-					status.alarm = None;
-					Self::service_referendum(now, index, status)
-				},
-				Some(ReferendumInfo::Finalizing(mut status)) => {
-					status.alarm = None;
-					Self::service_auction(now, index, status)
-				},
-				Some(info) => (info, false, ServiceBranch::Fail),
-				_ => Err(Error::<T, I>::NotOngoing)?,
-			};
-
+			let mut status = Self::ensure_ongoing(index)?;
+			// This is our wake-up, so we can disregard the alarm.
+			status.alarm = None;
+			let (info, dirty, branch) = Self::service_referendum(now, index, status);
 			if dirty {
 				ReferendumInfoFor::<T, I>::insert(index, info);
 			}
@@ -769,8 +757,17 @@ impl<T: Config<I>, I: 'static> Polling<T::Tally> for Pallet<T, I> {
 	) -> R {
 		match ReferendumInfoFor::<T, I>::get(index) {
 			Some(ReferendumInfo::Ongoing(mut status)) => {
-				let result = f(PollStatus::Ongoing(&mut status.tally, status.track));
 				let now = frame_system::Pallet::<T>::block_number();
+				let is_finalizing = status
+					.clone()
+					.deciding
+					.map(|d| d.confirming.map(|x| now >= x).unwrap_or(false))
+					.unwrap();
+				if is_finalizing {
+					return f(PollStatus::None);
+				}
+
+				let result = f(PollStatus::Ongoing(&mut status.tally, status.track));
 				Self::ensure_alarm_at(&mut status, index, now + One::one());
 				ReferendumInfoFor::<T, I>::insert(index, ReferendumInfo::Ongoing(status));
 				result
@@ -789,8 +786,17 @@ impl<T: Config<I>, I: 'static> Polling<T::Tally> for Pallet<T, I> {
 	) -> Result<R, DispatchError> {
 		match ReferendumInfoFor::<T, I>::get(index) {
 			Some(ReferendumInfo::Ongoing(mut status)) => {
-				let result = f(PollStatus::Ongoing(&mut status.tally, status.track))?;
 				let now = frame_system::Pallet::<T>::block_number();
+				let is_finalizing = status
+					.clone()
+					.deciding
+					.map(|d| d.confirming.map(|x| now >= x).unwrap_or(false))
+					.unwrap();
+				if is_finalizing {
+					return f(PollStatus::None);
+				}
+
+				let result = f(PollStatus::Ongoing(&mut status.tally, status.track))?;
 				Self::ensure_alarm_at(&mut status, index, now + One::one());
 				ReferendumInfoFor::<T, I>::insert(index, ReferendumInfo::Ongoing(status));
 				Ok(result)
@@ -867,7 +873,16 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		index: ReferendumIndex,
 	) -> Result<ReferendumStatusOf<T, I>, DispatchError> {
 		match ReferendumInfoFor::<T, I>::get(index) {
-			Some(ReferendumInfo::Ongoing(status)) => Ok(status),
+			Some(ReferendumInfo::Ongoing(status)) => {
+				match status.clone().deciding.map(|d| d.confirming) {
+					Some(Some(confirming))
+						if frame_system::Pallet::<T>::block_number() >= confirming =>
+					{
+						Err(Error::<T, I>::NotOngoing.into())
+					},
+					_ => Ok(status),
+				}
+			},
 			_ => Err(Error::<T, I>::NotOngoing.into()),
 		}
 	}
@@ -928,8 +943,8 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		let alarm_interval = T::AlarmInterval::get().max(One::one());
 		// Alarm must go off no earlier than `when`.
 		// This rounds `when` upwards to the next multiple of `alarm_interval`.
-		let when = (when.saturating_add(alarm_interval.saturating_sub(One::one())) /
-			alarm_interval)
+		let when = (when.saturating_add(alarm_interval.saturating_sub(One::one()))
+			/ alarm_interval)
 			.saturating_mul(alarm_interval);
 		let result = T::Scheduler::schedule(
 			DispatchTime::At(when),
@@ -1042,7 +1057,7 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 			Ok(c) => c,
 			Err(_) => {
 				debug_assert!(false, "Unable to create a bounded call from `one_fewer_deciding`??",);
-				return
+				return;
 			},
 		};
 		Self::set_alarm(call, next_block);
@@ -1069,7 +1084,7 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 							false,
 							"Unable to create a bounded call from `nudge_referendum`??",
 						);
-						return false
+						return false;
 					},
 				};
 			status.alarm = Self::set_alarm(call, alarm);
@@ -1173,7 +1188,7 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 						),
 						true,
 						ServiceBranch::TimedOut,
-					)
+					);
 				}
 			},
 			Some(deciding) => {
@@ -1185,6 +1200,7 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 					&track.min_approval,
 					status.track,
 				);
+
 				branch = if is_passing {
 					match deciding.confirming {
 						Some(t) if now >= t => {
@@ -1195,18 +1211,13 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 							// Sent to Auction only after confirm period finishes. Whether it will pass
 							// or not depends on the status history when confirming, and a random point
 							// in time within confirm period.
+
 							PassingStatusInConfirmPeriod::<T, I>::insert(
 								index,
 								now.saturating_less_one(),
 								is_passing,
 							);
-							Self::ensure_alarm_at(&mut status, index, now.saturating_plus_one());
-
-							return (
-								ReferendumInfo::Finalizing(status),
-								true,
-								ServiceBranch::ContinueConfirming,
-							)
+							return Self::service_auction(now, index, status);
 						},
 						Some(_) => {
 							// We don't care if failing within confirm period.
@@ -1244,13 +1255,7 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 								now.saturating_less_one(),
 								is_passing,
 							);
-							Self::ensure_alarm_at(&mut status, index, now.saturating_plus_one());
-
-							return (
-								ReferendumInfo::Finalizing(status),
-								true,
-								ServiceBranch::ContinueConfirming,
-							)
+							return Self::service_auction(now, index, status);
 						},
 						Some(_) => {
 							// We don't care if failing within confirm period.
@@ -1308,7 +1313,7 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		// Note: it'd be weird to come up to this point and yet not have a track
 		let track = match Self::track(status.clone().track) {
 			Some(x) => x,
-			None => return (ReferendumInfo::Finalizing(status), false, ServiceBranch::Fail),
+			None => return (ReferendumInfo::Ongoing(status), false, ServiceBranch::Fail),
 		};
 
 		let confirming_until = status
@@ -1325,7 +1330,9 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		// Do not use random until made sure random seed is not known before confirm ends
 		if known_since <= confirming_until {
 			Self::ensure_alarm_at(&mut status, index, now.saturating_plus_one());
-			return (ReferendumInfo::Finalizing(status), false, ServiceBranch::ContinueConfirming);
+			return (ReferendumInfo::Ongoing(status), false, ServiceBranch::ContinueConfirming);
+		} else {
+			Self::ensure_no_alarm(&mut status);
 		}
 
 		let raw_offset_block_number = <BlockNumberFor<T>>::decode(&mut raw_offset.as_ref())
@@ -1454,8 +1461,8 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		id: TrackIdOf<T, I>,
 	) -> bool {
 		let x = Perbill::from_rational(elapsed.min(period), period);
-		support_needed.passing(x, tally.support(id)) &&
-			approval_needed.passing(x, tally.approval(id))
+		support_needed.passing(x, tally.support(id))
+			&& approval_needed.passing(x, tally.approval(id))
 	}
 
 	/// Clear metadata if exist for a given referendum index.
@@ -1477,8 +1484,8 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 	#[cfg(any(feature = "try-runtime", test))]
 	fn do_try_state() -> Result<(), sp_runtime::TryRuntimeError> {
 		ensure!(
-			ReferendumCount::<T, I>::get() as usize ==
-				ReferendumInfoFor::<T, I>::iter_keys().count(),
+			ReferendumCount::<T, I>::get() as usize
+				== ReferendumInfoFor::<T, I>::iter_keys().count(),
 			"Number of referenda in `ReferendumInfoFor` is different than `ReferendumCount`"
 		);
 
@@ -1516,8 +1523,8 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 
 					if let Some(deciding) = status.deciding {
 						ensure!(
-							deciding.since <
-								deciding.confirming.unwrap_or(BlockNumberFor::<T>::max_value()),
+							deciding.since
+								< deciding.confirming.unwrap_or(BlockNumberFor::<T>::max_value()),
 							"Deciding status cannot begin before confirming stage."
 						)
 					}

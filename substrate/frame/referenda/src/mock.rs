@@ -420,10 +420,6 @@ pub fn deciding_and_failing_since(i: ReferendumIndex) -> u64 {
 			deciding: Some(DecidingStatus { since, confirming: None, .. }),
 			..
 		}) => since,
-		ReferendumInfo::Finalizing(ReferendumStatus {
-			deciding: Some(DecidingStatus { since, confirming: None, .. }),
-			..
-		}) => since,
 		_ => panic!("Not deciding"),
 	}
 }
