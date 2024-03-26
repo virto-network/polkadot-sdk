@@ -84,7 +84,7 @@ use sp_runtime::{
 	traits::{AtLeast32BitUnsigned, Bounded, Dispatchable, One, Saturating, Zero},
 	DispatchError, Perbill,
 };
-use sp_std::{fmt::Debug, prelude::*};
+use sp_std::{fmt::Debug, ops::Bound::Included, prelude::*};
 
 mod branch;
 pub mod migration;
@@ -142,6 +142,7 @@ pub mod pallet {
 	use super::*;
 	use frame_support::{pallet_prelude::*, traits::EnsureOriginWithArg};
 	use frame_system::pallet_prelude::*;
+	use sp_std::collections::btree_map::BTreeMap;
 
 	/// The in-code storage version.
 	const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
@@ -251,13 +252,12 @@ pub mod pallet {
 
 	/// State change within confirm period.
 	#[pallet::storage]
-	pub type PassingStatusInConfirmPeriod<T: Config<I>, I: 'static = ()> = StorageDoubleMap<
+	#[pallet::unbounded]
+	pub type PassingStatusInConfirmPeriod<T: Config<I>, I: 'static = ()> = StorageMap<
 		_,
 		Blake2_128Concat,
 		ReferendumIndex,
-		Blake2_128Concat,
-		BlockNumberFor<T>,
-		bool,
+		BTreeMap<BlockNumberFor<T>, bool>,
 		ValueQuery,
 	>;
 
@@ -1097,6 +1097,16 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		}
 	}
 
+	fn insert_or_update_passing_status_on_confirm(
+		index: ReferendumIndex,
+		when: BlockNumberFor<T>,
+		state: bool,
+	) {
+		PassingStatusInConfirmPeriod::<T, I>::mutate(index, |confirm_status| {
+			confirm_status.insert(when, state);
+		});
+	}
+
 	/// Advance the state of a referendum, which comes down to:
 	/// - If it's ready to be decided, start deciding;
 	/// - If it's not ready to be decided and non-deciding timeout has passed, fail;
@@ -1215,7 +1225,7 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 							// or not depends on the status history when confirming, and a random point
 							// in time within confirm period.
 
-							PassingStatusInConfirmPeriod::<T, I>::insert(
+							Self::insert_or_update_passing_status_on_confirm(
 								index,
 								now.saturating_less_one(),
 								is_passing,
@@ -1225,7 +1235,11 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 						Some(_) => {
 							// We don't care if failing within confirm period.
 							// Report the change of state, and continue.
-							PassingStatusInConfirmPeriod::<T, I>::insert(index, now, is_passing);
+							Self::insert_or_update_passing_status_on_confirm(
+								index,
+								now.saturating_less_one(),
+								is_passing,
+							);
 							ServiceBranch::ContinueConfirming
 						},
 						None => {
@@ -1253,7 +1267,7 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 							// Sent to Auction only after confirm period finishes. Whether it will pass
 							// or not depends on the status history when confirming, and a random point
 							// in time within confirm period.
-							PassingStatusInConfirmPeriod::<T, I>::insert(
+							Self::insert_or_update_passing_status_on_confirm(
 								index,
 								now.saturating_less_one(),
 								is_passing,
@@ -1263,7 +1277,11 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 						Some(_) => {
 							// We don't care if failing within confirm period.
 							// Report the change of state, and continue.
-							PassingStatusInConfirmPeriod::<T, I>::insert(index, now, is_passing);
+							Self::insert_or_update_passing_status_on_confirm(
+								index,
+								now.saturating_less_one(),
+								is_passing,
+							);
 							ServiceBranch::ContinueConfirming
 						},
 						None => {
@@ -1349,16 +1367,12 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 			confirming_since.saturating_add(raw_offset_block_number % track.confirm_period)
 		};
 
-		let mut statuses =
-			PassingStatusInConfirmPeriod::<T, I>::iter_prefix(index).collect::<Vec<_>>();
-		statuses.sort_by(|(a, _), (b, _)| b.cmp(a));
+		let statuses = PassingStatusInConfirmPeriod::<T, I>::get(index);
+		let statuses =
+			statuses.range((Included(&confirming_since), Included(&candle_block_number)));
+		let (_, winning_status) = statuses.last().unwrap_or((&now, &true));
 
-		let (_, winning_status) = statuses
-			.into_iter()
-			.find(|(when, _)| when <= &candle_block_number)
-			.unwrap_or((now, true));
-
-		if winning_status {
+		if *winning_status {
 			// Passed!
 			Self::ensure_no_alarm(&mut status);
 			Self::note_one_fewer_deciding(status.track);
