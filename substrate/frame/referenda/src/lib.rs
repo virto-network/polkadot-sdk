@@ -627,11 +627,7 @@ pub mod pallet {
 		) -> DispatchResultWithPostInfo {
 			ensure_root(origin)?;
 			let now = frame_system::Pallet::<T>::block_number();
-
-			let mut status = match ReferendumInfoFor::<T, I>::get(index) {
-				Some(ReferendumInfo::Ongoing(status)) => Ok(status),
-				_ => Err(Error::<T, I>::NotOngoing),
-			}?;
+			let mut status = Self::ensure_ongoing(index)?;
 			// This is our wake-up, so we can disregard the alarm.
 			status.alarm = None;
 			let (info, dirty, branch) = Self::service_referendum(now, index, status);
@@ -744,6 +740,19 @@ pub mod pallet {
 	}
 }
 
+#[inline]
+fn is_finalizing<T: Config<I>, I: 'static>(status: &ReferendumStatusOf<T, I>) -> bool {
+	status
+		.clone()
+		.deciding
+		.map(|d| {
+			d.confirming
+				.map(|x| frame_system::Pallet::<T>::block_number() >= x)
+				.unwrap_or(false)
+		})
+		.unwrap_or(false)
+}
+
 impl<T: Config<I>, I: 'static> Polling<T::Tally> for Pallet<T, I> {
 	type Index = ReferendumIndex;
 	type Votes = VotesOf<T, I>;
@@ -760,17 +769,11 @@ impl<T: Config<I>, I: 'static> Polling<T::Tally> for Pallet<T, I> {
 	) -> R {
 		match ReferendumInfoFor::<T, I>::get(index) {
 			Some(ReferendumInfo::Ongoing(mut status)) => {
-				let now = frame_system::Pallet::<T>::block_number();
-				let is_finalizing = status
-					.clone()
-					.deciding
-					.map(|d| d.confirming.map(|x| now >= x).unwrap_or(false))
-					.unwrap_or(false);
-				if is_finalizing {
+				if is_finalizing(&status) {
 					return f(PollStatus::None);
 				}
-
 				let result = f(PollStatus::Ongoing(&mut status.tally, status.track));
+				let now = frame_system::Pallet::<T>::block_number();
 				Self::ensure_alarm_at(&mut status, index, now + One::one());
 				ReferendumInfoFor::<T, I>::insert(index, ReferendumInfo::Ongoing(status));
 				result
@@ -789,17 +792,11 @@ impl<T: Config<I>, I: 'static> Polling<T::Tally> for Pallet<T, I> {
 	) -> Result<R, DispatchError> {
 		match ReferendumInfoFor::<T, I>::get(index) {
 			Some(ReferendumInfo::Ongoing(mut status)) => {
-				let now = frame_system::Pallet::<T>::block_number();
-				let is_finalizing = status
-					.clone()
-					.deciding
-					.map(|d| d.confirming.map(|x| now >= x).unwrap_or(false))
-					.unwrap_or(false);
-				if is_finalizing {
+				if is_finalizing(&status) {
 					return f(PollStatus::None);
 				}
-
 				let result = f(PollStatus::Ongoing(&mut status.tally, status.track))?;
+				let now = frame_system::Pallet::<T>::block_number();
 				Self::ensure_alarm_at(&mut status, index, now + One::one());
 				ReferendumInfoFor::<T, I>::insert(index, ReferendumInfo::Ongoing(status));
 				Ok(result)
@@ -876,16 +873,7 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		index: ReferendumIndex,
 	) -> Result<ReferendumStatusOf<T, I>, DispatchError> {
 		match ReferendumInfoFor::<T, I>::get(index) {
-			Some(ReferendumInfo::Ongoing(status)) => {
-				match status.clone().deciding.map(|d| d.confirming) {
-					Some(Some(confirming))
-						if frame_system::Pallet::<T>::block_number() >= confirming =>
-					{
-						Err(Error::<T, I>::NotOngoing.into())
-					},
-					_ => Ok(status),
-				}
-			},
+			Some(ReferendumInfo::Ongoing(status)) => Ok(status),
 			_ => Err(Error::<T, I>::NotOngoing.into()),
 		}
 	}
@@ -946,8 +934,8 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		let alarm_interval = T::AlarmInterval::get().max(One::one());
 		// Alarm must go off no earlier than `when`.
 		// This rounds `when` upwards to the next multiple of `alarm_interval`.
-		let when = (when.saturating_add(alarm_interval.saturating_sub(One::one()))
-			/ alarm_interval)
+		let when = (when.saturating_add(alarm_interval.saturating_sub(One::one())) /
+			alarm_interval)
 			.saturating_mul(alarm_interval);
 		let result = T::Scheduler::schedule(
 			DispatchTime::At(when),
@@ -1060,7 +1048,7 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 			Ok(c) => c,
 			Err(_) => {
 				debug_assert!(false, "Unable to create a bounded call from `one_fewer_deciding`??",);
-				return;
+				return
 			},
 		};
 		Self::set_alarm(call, next_block);
@@ -1087,7 +1075,7 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 							false,
 							"Unable to create a bounded call from `nudge_referendum`??",
 						);
-						return false;
+						return false
 					},
 				};
 			status.alarm = Self::set_alarm(call, alarm);
@@ -1201,7 +1189,7 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 						),
 						true,
 						ServiceBranch::TimedOut,
-					);
+					)
 				}
 			},
 			Some(deciding) => {
@@ -1230,7 +1218,7 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 								now.saturating_less_one(),
 								is_passing,
 							);
-							return Self::service_auction(now, index, status);
+							return Self::confirm_by_candle(now, index, status);
 						},
 						Some(_) => {
 							// We don't care if failing within confirm period.
@@ -1272,7 +1260,7 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 								now.saturating_less_one(),
 								is_passing,
 							);
-							return Self::service_auction(now, index, status);
+							return Self::confirm_by_candle(now, index, status);
 						},
 						Some(_) => {
 							// We don't care if failing within confirm period.
@@ -1321,12 +1309,13 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		(ReferendumInfo::Ongoing(status), dirty_alarm || dirty, branch)
 	}
 
-	/// "Candle" auction to decide the winning status of confirm period.
+	/// Find  "candle" moment  within the confirm period to decide whether the referendum is
+	/// confirmed or not.
 	///
 	/// The "candle": passing or failing of a referendum is ultimately decided as a candle auction
 	/// where, given a random point in time (defined as `t`), the definitive status of the the
 	/// referendum is decided by the last status registered before `t`.
-	fn service_auction(
+	fn confirm_by_candle(
 		now: BlockNumberFor<T>,
 		index: ReferendumIndex,
 		mut status: ReferendumStatusOf<T, I>,
@@ -1340,9 +1329,9 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		let confirming_until = status
 			.clone()
 			.deciding
-			.expect("having passed ongoing, we should have times for decision; qed")
+			.expect("called after having deciding, we have deciding.since time; qed")
 			.confirming
-			.expect("having finished confirming, we should have a confirming_until time; qed");
+			.expect("called after finished confirming, we have a confirming_until time; qed");
 
 		let confirming_since = confirming_until.saturating_sub(track.confirm_period);
 
@@ -1370,9 +1359,12 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		let statuses = PassingStatusInConfirmPeriod::<T, I>::get(index);
 		let statuses =
 			statuses.range((Included(&confirming_since), Included(&candle_block_number)));
-		let (_, winning_status) = statuses.last().unwrap_or((&now, &true));
+		let (_, is_confirmed) = statuses.last().unwrap_or((&now, &true));
 
-		if *winning_status {
+		// Cleanup passing status
+		PassingStatusInConfirmPeriod::<T, I>::remove(index);
+
+		if *is_confirmed {
 			// Passed!
 			Self::ensure_no_alarm(&mut status);
 			Self::note_one_fewer_deciding(status.track);
@@ -1478,8 +1470,8 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		id: TrackIdOf<T, I>,
 	) -> bool {
 		let x = Perbill::from_rational(elapsed.min(period), period);
-		support_needed.passing(x, tally.support(id))
-			&& approval_needed.passing(x, tally.approval(id))
+		support_needed.passing(x, tally.support(id)) &&
+			approval_needed.passing(x, tally.approval(id))
 	}
 
 	/// Clear metadata if exist for a given referendum index.
@@ -1501,8 +1493,8 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 	#[cfg(any(feature = "try-runtime", test))]
 	fn do_try_state() -> Result<(), sp_runtime::TryRuntimeError> {
 		ensure!(
-			ReferendumCount::<T, I>::get() as usize
-				== ReferendumInfoFor::<T, I>::iter_keys().count(),
+			ReferendumCount::<T, I>::get() as usize ==
+				ReferendumInfoFor::<T, I>::iter_keys().count(),
 			"Number of referenda in `ReferendumInfoFor` is different than `ReferendumCount`"
 		);
 
@@ -1540,8 +1532,8 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 
 					if let Some(deciding) = status.deciding {
 						ensure!(
-							deciding.since
-								< deciding.confirming.unwrap_or(BlockNumberFor::<T>::max_value()),
+							deciding.since <
+								deciding.confirming.unwrap_or(BlockNumberFor::<T>::max_value()),
 							"Deciding status cannot begin before confirming stage."
 						)
 					}
