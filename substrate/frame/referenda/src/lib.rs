@@ -64,7 +64,7 @@
 #![recursion_limit = "256"]
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use codec::{Codec, Encode};
+use codec::{Codec, Decode, Encode};
 use frame_support::{
 	dispatch::DispatchResult,
 	ensure,
@@ -74,7 +74,7 @@ use frame_support::{
 			DispatchTime,
 		},
 		Currency, LockIdentifier, OnUnbalanced, OriginTrait, PollStatus, Polling, QueryPreimage,
-		ReservableCurrency, StorePreimage, VoteTally,
+		Randomness, ReservableCurrency, StorePreimage, VoteTally,
 	},
 	BoundedVec,
 };
@@ -84,7 +84,7 @@ use sp_runtime::{
 	traits::{AtLeast32BitUnsigned, Bounded, Dispatchable, One, Saturating, Zero},
 	DispatchError, Perbill,
 };
-use sp_std::{fmt::Debug, prelude::*};
+use sp_std::{fmt::Debug, ops::Bound::Included, prelude::*};
 
 mod branch;
 pub mod migration;
@@ -142,6 +142,7 @@ pub mod pallet {
 	use super::*;
 	use frame_support::{pallet_prelude::*, traits::EnsureOriginWithArg};
 	use frame_system::pallet_prelude::*;
+	use sp_std::collections::btree_map::BTreeMap;
 
 	/// The in-code storage version.
 	const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
@@ -174,6 +175,8 @@ pub mod pallet {
 				PalletsOriginOf<Self>,
 				Hasher = Self::Hashing,
 			>;
+		/// Something that provides randomness in the runtime.
+		type Randomness: Randomness<Self::Hash, BlockNumberFor<Self>>;
 		/// Currency type for this pallet.
 		type Currency: ReservableCurrency<Self::AccountId>;
 		// Origins and unbalances.
@@ -246,6 +249,17 @@ pub mod pallet {
 	#[pallet::storage]
 	pub type ReferendumInfoFor<T: Config<I>, I: 'static = ()> =
 		StorageMap<_, Blake2_128Concat, ReferendumIndex, ReferendumInfoOf<T, I>>;
+
+	/// State change within confirm period.
+	#[pallet::storage]
+	#[pallet::unbounded]
+	pub type PassingStatusInConfirmPeriod<T: Config<I>, I: 'static = ()> = StorageMap<
+		_,
+		Blake2_128Concat,
+		ReferendumIndex,
+		BTreeMap<BlockNumberFor<T>, bool>,
+		ValueQuery,
+	>;
 
 	/// The sorted list of referenda ready to be decided but not yet being decided, ordered by
 	/// conviction-weighted approvals.
@@ -738,6 +752,19 @@ pub mod pallet {
 	}
 }
 
+#[inline]
+fn is_finalizing<T: Config<I>, I: 'static>(status: &ReferendumStatusOf<T, I>) -> bool {
+	status
+		.clone()
+		.deciding
+		.map(|d| {
+			d.confirming
+				.map(|x| frame_system::Pallet::<T>::block_number() >= x)
+				.unwrap_or(false)
+		})
+		.unwrap_or(false)
+}
+
 impl<T: Config<I>, I: 'static> Polling<T::Tally> for Pallet<T, I> {
 	type Index = ReferendumIndex;
 	type Votes = VotesOf<T, I>;
@@ -754,6 +781,9 @@ impl<T: Config<I>, I: 'static> Polling<T::Tally> for Pallet<T, I> {
 	) -> R {
 		match ReferendumInfoFor::<T, I>::get(index) {
 			Some(ReferendumInfo::Ongoing(mut status)) => {
+				if is_finalizing(&status) {
+					return f(PollStatus::None);
+				}
 				let result = f(PollStatus::Ongoing(&mut status.tally, status.track));
 				let now = frame_system::Pallet::<T>::block_number();
 				Self::ensure_alarm_at(&mut status, index, now + One::one());
@@ -774,6 +804,9 @@ impl<T: Config<I>, I: 'static> Polling<T::Tally> for Pallet<T, I> {
 	) -> Result<R, DispatchError> {
 		match ReferendumInfoFor::<T, I>::get(index) {
 			Some(ReferendumInfo::Ongoing(mut status)) => {
+				if is_finalizing(&status) {
+					return f(PollStatus::None);
+				}
 				let result = f(PollStatus::Ongoing(&mut status.tally, status.track))?;
 				let now = frame_system::Pallet::<T>::block_number();
 				Self::ensure_alarm_at(&mut status, index, now + One::one());
@@ -1064,11 +1097,23 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		}
 	}
 
+	fn insert_or_update_passing_status_on_confirm(
+		index: ReferendumIndex,
+		when: BlockNumberFor<T>,
+		state: bool,
+	) {
+		PassingStatusInConfirmPeriod::<T, I>::mutate(index, |confirm_status| {
+			confirm_status.insert(when, state);
+		});
+	}
+
 	/// Advance the state of a referendum, which comes down to:
 	/// - If it's ready to be decided, start deciding;
 	/// - If it's not ready to be decided and non-deciding timeout has passed, fail;
-	/// - If it's ongoing and passing, ensure confirming; if at end of confirmation period, pass.
-	/// - If it's ongoing and not passing, stop confirming; if it has reached end time, fail.
+	/// - If it's ongoing and passing, ensure confirming; if at end of confirmation period, decide
+	/// by "candle".
+	/// - If it's ongoing and not passing, stop confirming; if it has reached end time, decide by
+	/// "candle".
 	///
 	/// Weight will be a bit different depending on what it does, but it's designed so as not to
 	/// differ dramatically, especially if `MaxQueue` is kept small. In particular _there are no
@@ -1168,29 +1213,35 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 					&track.min_approval,
 					status.track,
 				);
+
 				branch = if is_passing {
 					match deciding.confirming {
 						Some(t) if now >= t => {
-							// Passed!
-							Self::ensure_no_alarm(&mut status);
-							Self::note_one_fewer_deciding(status.track);
-							let (desired, call) = (status.enactment, status.proposal);
-							Self::schedule_enactment(index, track, desired, status.origin, call);
-							Self::deposit_event(Event::<T, I>::Confirmed {
+							// Ongoing is now Finished. From now on, it'll be impossible to modify the
+							// poll. The passing status will be now decided by the auction, and the
+							// information stored under `PassingStatusInConfirmPeriod`.
+
+							// Sent to Auction only after confirm period finishes. Whether it will pass
+							// or not depends on the status history when confirming, and a random point
+							// in time within confirm period.
+
+							Self::insert_or_update_passing_status_on_confirm(
 								index,
-								tally: status.tally,
-							});
-							return (
-								ReferendumInfo::Approved(
-									now,
-									Some(status.submission_deposit),
-									status.decision_deposit,
-								),
-								true,
-								ServiceBranch::Approved,
-							)
+								now.saturating_less_one(),
+								is_passing,
+							);
+							return Self::confirm_by_candle(now, index, status);
 						},
-						Some(_) => ServiceBranch::ContinueConfirming,
+						Some(_) => {
+							// We don't care if failing within confirm period.
+							// Report the change of state, and continue.
+							Self::insert_or_update_passing_status_on_confirm(
+								index,
+								now.saturating_less_one(),
+								is_passing,
+							);
+							ServiceBranch::ContinueConfirming
+						},
 						None => {
 							// Start confirming
 							dirty = true;
@@ -1200,29 +1251,62 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 						},
 					}
 				} else {
-					if now >= deciding.since.saturating_add(track.decision_period) {
-						// Failed!
-						Self::ensure_no_alarm(&mut status);
-						Self::note_one_fewer_deciding(status.track);
-						Self::deposit_event(Event::<T, I>::Rejected { index, tally: status.tally });
-						return (
-							ReferendumInfo::Rejected(
-								now,
-								Some(status.submission_deposit),
-								status.decision_deposit,
-							),
-							true,
-							ServiceBranch::Rejected,
-						)
-					}
-					if deciding.confirming.is_some() {
-						// Stop confirming
-						dirty = true;
-						deciding.confirming = None;
-						Self::deposit_event(Event::<T, I>::ConfirmAborted { index });
-						ServiceBranch::EndConfirming
-					} else {
-						ServiceBranch::ContinueNotConfirming
+					match deciding.confirming {
+						Some(_) if now <= deciding.since.saturating_add(track.decision_period) => {
+							// Stop confirming
+							dirty = true;
+							deciding.confirming = None;
+							Self::deposit_event(Event::<T, I>::ConfirmAborted { index });
+							ServiceBranch::EndConfirming
+						},
+						Some(t) if now >= t => {
+							// Ongoing is now Finished. From now on, it'll be impossible to modify the
+							// poll. The passing status will be now decided by the auction, and the
+							// information stored under `PassingStatusInConfirmPeriod`.
+
+							// Sent to Auction only after confirm period finishes. Whether it will pass
+							// or not depends on the status history when confirming, and a random point
+							// in time within confirm period.
+							Self::insert_or_update_passing_status_on_confirm(
+								index,
+								now.saturating_less_one(),
+								is_passing,
+							);
+							return Self::confirm_by_candle(now, index, status);
+						},
+						Some(_) => {
+							// We don't care if failing within confirm period.
+							// Report the change of state, and continue.
+							Self::insert_or_update_passing_status_on_confirm(
+								index,
+								now.saturating_less_one(),
+								is_passing,
+							);
+							ServiceBranch::ContinueConfirming
+						},
+						None => {
+							if now >= deciding.since.saturating_add(track.decision_period) {
+								// Exceeded decision period without having passed in first place.
+								// Failed!
+								Self::ensure_no_alarm(&mut status);
+								Self::note_one_fewer_deciding(status.track);
+								Self::deposit_event(Event::<T, I>::Rejected {
+									index,
+									tally: status.tally,
+								});
+								return (
+									ReferendumInfo::Rejected(
+										now,
+										Some(status.submission_deposit),
+										status.decision_deposit,
+									),
+									true,
+									ServiceBranch::Rejected,
+								);
+							} else {
+								ServiceBranch::ContinueNotConfirming
+							}
+						},
 					}
 				};
 				alarm = Self::decision_time(deciding, &status.tally, status.track, track);
@@ -1235,6 +1319,94 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 			Self::ensure_no_alarm(&mut status)
 		};
 		(ReferendumInfo::Ongoing(status), dirty_alarm || dirty, branch)
+	}
+
+	/// Find  "candle" moment  within the confirm period to decide whether the referendum is
+	/// confirmed or not.
+	///
+	/// The "candle": passing or failing of a referendum is ultimately decided as a candle auction
+	/// where, given a random point in time (defined as `t`), the definitive status of the the
+	/// referendum is decided by the last status registered before `t`.
+	fn confirm_by_candle(
+		now: BlockNumberFor<T>,
+		index: ReferendumIndex,
+		mut status: ReferendumStatusOf<T, I>,
+	) -> (ReferendumInfoOf<T, I>, bool, ServiceBranch) {
+		// Note: it'd be weird to come up to this point and yet not have a track
+		let track = match Self::track(status.clone().track) {
+			Some(x) => x,
+			None => return (ReferendumInfo::Ongoing(status), false, ServiceBranch::Fail),
+		};
+
+		let confirming_until = status
+			.clone()
+			.deciding
+			.expect("called after having deciding, we have deciding.since time; qed")
+			.confirming
+			.expect("called after finished confirming, we have a confirming_until time; qed");
+
+		let confirming_since = confirming_until.saturating_sub(track.confirm_period);
+
+		let (raw_offset, known_since) = T::Randomness::random(&b"confirm_auction"[..]);
+
+		// Do not use random until made sure random seed is not known before confirm ends
+		if known_since <= confirming_until {
+			Self::ensure_alarm_at(&mut status, index, now.saturating_plus_one());
+			return (ReferendumInfo::Ongoing(status), false, ServiceBranch::ContinueConfirming);
+		} else {
+			Self::ensure_no_alarm(&mut status);
+		}
+
+		let raw_offset_block_number = <BlockNumberFor<T>>::decode(&mut raw_offset.as_ref())
+			.expect("secure hashes should always be bigger than the block number; qed");
+
+		let candle_block_number = if confirming_since <= raw_offset_block_number
+			&& raw_offset_block_number < confirming_until
+		{
+			raw_offset_block_number
+		} else {
+			confirming_since.saturating_add(raw_offset_block_number % track.confirm_period)
+		};
+
+		let statuses = PassingStatusInConfirmPeriod::<T, I>::get(index);
+		let statuses =
+			statuses.range((Included(&confirming_since), Included(&candle_block_number)));
+		let (_, is_confirmed) = statuses.last().unwrap_or((&now, &true));
+
+		// Cleanup passing status
+		PassingStatusInConfirmPeriod::<T, I>::remove(index);
+
+		if *is_confirmed {
+			// Passed!
+			Self::ensure_no_alarm(&mut status);
+			Self::note_one_fewer_deciding(status.track);
+			let (desired, call) = (status.enactment, status.proposal);
+			Self::schedule_enactment(index, track, desired, status.origin, call);
+			Self::deposit_event(Event::<T, I>::Confirmed { index, tally: status.tally });
+			(
+				ReferendumInfo::Approved(
+					now,
+					Some(status.submission_deposit),
+					status.decision_deposit,
+				),
+				true,
+				ServiceBranch::Approved,
+			)
+		} else {
+			// Failed!
+			Self::ensure_no_alarm(&mut status);
+			Self::note_one_fewer_deciding(status.track);
+			Self::deposit_event(Event::<T, I>::Rejected { index, tally: status.tally });
+			return (
+				ReferendumInfo::Rejected(
+					now,
+					Some(status.submission_deposit),
+					status.decision_deposit,
+				),
+				true,
+				ServiceBranch::Rejected,
+			);
+		}
 	}
 
 	/// Determine the point at which a referendum will be accepted, move into confirmation with the

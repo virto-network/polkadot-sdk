@@ -21,7 +21,7 @@ use super::*;
 use crate as pallet_referenda;
 use codec::{Decode, Encode, MaxEncodedLen};
 use frame_support::{
-	assert_ok, derive_impl, ord_parameter_types, parameter_types,
+	assert_ok, derive_impl, ord_parameter_types, parameter_types, storage_alias,
 	traits::{
 		ConstU32, ConstU64, Contains, EqualPrivilegeOnly, OnInitialize, OriginTrait, Polling,
 		SortedMembers,
@@ -29,6 +29,7 @@ use frame_support::{
 	weights::Weight,
 };
 use frame_system::{EnsureRoot, EnsureSignedBy};
+use sp_core::H256;
 use sp_runtime::{
 	traits::{BlakeTwo256, Hash},
 	BuildStorage, DispatchResult, Perbill,
@@ -118,12 +119,44 @@ impl SortedMembers<u64> for OneToFive {
 	fn add(_m: &u64) {}
 }
 
+#[storage_alias]
+pub type TestRandomnessBlockNumberOffset<T: Config<I>, I: 'static> =
+	StorageValue<Pallet<T, I>, BlockNumberFor<T>>;
+
+pub struct TestRandomness;
+
+impl TestRandomness {
+	pub fn place_candle() {
+		TestRandomnessBlockNumberOffset::<Test, ()>::set(Some(System::block_number()));
+	}
+
+	fn hash_256_like_for(n: BlockNumberFor<Test>) -> [u8; 32] {
+		let mut encoded = n.encode();
+		while encoded.len() < 32 {
+			encoded.push(0);
+		}
+
+		encoded.try_into().expect("added bytes until 32")
+	}
+}
+
+impl frame_support::traits::Randomness<H256, BlockNumberFor<Test>> for TestRandomness {
+	fn random(_: &[u8]) -> (H256, BlockNumberFor<Test>) {
+		let block_number = TestRandomnessBlockNumberOffset::<Test, ()>::get()
+			.unwrap_or(System::block_number().saturating_less_one());
+
+		let block_hash: H256 = Self::hash_256_like_for(block_number).into();
+
+		(block_hash, System::block_number())
+	}
+}
+
 pub struct TestTracksInfo;
 impl TracksInfo<u64, u64> for TestTracksInfo {
 	type Id = u8;
 	type RuntimeOrigin = <RuntimeOrigin as OriginTrait>::PalletsOrigin;
 	fn tracks() -> &'static [(Self::Id, TrackInfo<u64, u64>)] {
-		static DATA: [(u8, TrackInfo<u64, u64>); 2] = [
+		static DATA: [(u8, TrackInfo<u64, u64>); 3] = [
 			(
 				0u8,
 				TrackInfo {
@@ -168,6 +201,28 @@ impl TracksInfo<u64, u64> for TestTracksInfo {
 					},
 				},
 			),
+			(
+				2u8,
+				TrackInfo {
+					name: "signed by 100",
+					max_deciding: 1,
+					decision_deposit: 1,
+					prepare_period: 1,
+					decision_period: 14,
+					confirm_period: 7,
+					min_enactment_period: 2,
+					min_approval: Curve::LinearDecreasing {
+						length: Perbill::from_percent(100),
+						floor: Perbill::from_percent(50),
+						ceil: Perbill::from_percent(100),
+					},
+					min_support: Curve::LinearDecreasing {
+						length: Perbill::from_percent(50),
+						floor: Perbill::from_percent(0),
+						ceil: Perbill::from_percent(100),
+					},
+				},
+			),
 		];
 		&DATA[..]
 	}
@@ -176,6 +231,7 @@ impl TracksInfo<u64, u64> for TestTracksInfo {
 			match system_origin {
 				frame_system::RawOrigin::Root => Ok(0),
 				frame_system::RawOrigin::None => Ok(1),
+				frame_system::RawOrigin::Signed(100) => Ok(2),
 				_ => Err(()),
 			}
 		} else {
@@ -190,6 +246,7 @@ impl Config for Test {
 	type RuntimeCall = RuntimeCall;
 	type RuntimeEvent = RuntimeEvent;
 	type Scheduler = Scheduler;
+	type Randomness = TestRandomness;
 	type Currency = pallet_balances::Pallet<Self>;
 	type SubmitOrigin = frame_system::EnsureSigned<u64>;
 	type CancelOrigin = EnsureSignedBy<Four, u64>;
@@ -215,7 +272,7 @@ impl Default for ExtBuilder {
 impl ExtBuilder {
 	pub fn build(self) -> sp_io::TestExternalities {
 		let mut t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
-		let balances = vec![(1, 100), (2, 100), (3, 100), (4, 100), (5, 100), (6, 100)];
+		let balances = vec![(1, 100), (2, 100), (3, 100), (4, 100), (5, 100), (6, 100), (100, 100)];
 		pallet_balances::GenesisConfig::<Test> { balances }
 			.assimilate_storage(&mut t)
 			.unwrap();
@@ -290,6 +347,11 @@ pub fn set_balance_proposal_bounded(value: u64) -> BoundedCallOf<Test, ()> {
 		who: 42,
 		new_free: value,
 	});
+	<Preimage as StorePreimage>::bound(c).unwrap()
+}
+
+pub fn transfer_balance_proposal_bounded(value: u64) -> BoundedCallOf<Test, ()> {
+	let c = RuntimeCall::Balances(pallet_balances::Call::transfer_keep_alive { dest: 42, value });
 	<Preimage as StorePreimage>::bound(c).unwrap()
 }
 
@@ -422,13 +484,47 @@ pub enum RefState {
 }
 
 impl RefState {
+	/// Create default referendum:
+	///
+	/// - **Track**: _Root_ (`0`)
+	///	- **Call**: `Balances::force_set_balance(42, 1)`
 	pub fn create(self) -> ReferendumIndex {
+		Self::create_with_params(
+			self,
+			frame_support::dispatch::RawOrigin::Root.into(),
+			set_balance_proposal_bounded(1),
+		)
+	}
+
+	/// Create referendum with long duration:
+	///
+	/// - **Track**: _Signed by 100_ (`2`)
+	///	- **Call**: `Balances::transfer_keep_alive(42, 10)`
+	pub fn create_long(self) -> ReferendumIndex {
+		Self::create_with_params(
+			self,
+			frame_support::dispatch::RawOrigin::Signed(100).into(),
+			transfer_balance_proposal_bounded(10),
+		)
+	}
+
+	pub fn create_with_params(
+		self,
+		origin: PalletsOriginOf<Test>,
+		call: BoundedCallOf<Test, ()>,
+	) -> ReferendumIndex {
 		assert_ok!(Referenda::submit(
 			RuntimeOrigin::signed(1),
-			Box::new(frame_support::dispatch::RawOrigin::Root.into()),
-			set_balance_proposal_bounded(1),
+			Box::new(origin.clone()),
+			call,
 			DispatchTime::At(10),
 		));
+
+		let track_id = TestTracksInfo::track_for(&origin)
+			.expect("track should exist as the ref was successfully submitted; qed");
+		let tracks = TestTracksInfo::tracks();
+		let (_, track) = &tracks[track_id as usize];
+
 		assert_ok!(Referenda::place_decision_deposit(RuntimeOrigin::signed(2), 0));
 		if matches!(self, RefState::Confirming { immediate: true }) {
 			set_tally(0, 100, 0);
@@ -442,7 +538,7 @@ impl RefState {
 			run_to(System::block_number() + 1);
 		}
 		if matches!(self, RefState::Confirming { .. }) {
-			assert_eq!(confirming_until(index), System::block_number() + 2);
+			assert_eq!(confirming_until(index), System::block_number() + track.confirm_period);
 		}
 		if matches!(self, RefState::Passing) {
 			set_tally(0, 100, 99);

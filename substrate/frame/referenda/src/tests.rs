@@ -30,7 +30,7 @@ fn params_should_work() {
 	ExtBuilder::default().build_and_execute(|| {
 		assert_eq!(ReferendumCount::<Test>::get(), 0);
 		assert_eq!(Balances::free_balance(42), 0);
-		assert_eq!(Balances::total_issuance(), 600);
+		assert_eq!(Balances::total_issuance(), 700);
 	});
 }
 
@@ -57,15 +57,15 @@ fn basic_happy_path_works() {
 		set_tally(0, 100, 0);
 		run_to(7);
 		assert_eq!(confirming_until(0), 9);
-		run_to(9);
-		// #8: Should be confirmed & ended.
-		assert_eq!(approved_since(0), 9);
+		run_to(10);
+		// #10: Should confirm via auction.
+		assert_eq!(approved_since(0), 10);
 		assert_ok!(Referenda::refund_decision_deposit(RuntimeOrigin::signed(2), 0));
-		run_to(12);
-		// #9: Should not yet be enacted.
-		assert_eq!(Balances::free_balance(&42), 0);
 		run_to(13);
-		// #10: Proposal should be executed.
+		// #13: Should not yet be enacted.
+		assert_eq!(Balances::free_balance(&42), 0);
+		run_to(14);
+		// #14: Proposal should be executed.
 		assert_eq!(Balances::free_balance(&42), 1);
 	});
 }
@@ -89,8 +89,8 @@ fn confirm_then_reconfirm_with_elapsed_trigger_works() {
 		set_tally(r, 100, 99);
 		run_to(8);
 		assert_eq!(deciding_and_failing_since(r), 5);
-		run_to(11);
-		assert_eq!(approved_since(r), 11);
+		run_to(12);
+		assert_eq!(approved_since(r), 12);
 	});
 }
 
@@ -103,8 +103,8 @@ fn instaconfirm_then_reconfirm_with_elapsed_trigger_works() {
 		set_tally(r, 100, 99);
 		run_to(7);
 		assert_eq!(deciding_and_failing_since(r), 5);
-		run_to(11);
-		assert_eq!(approved_since(r), 11);
+		run_to(12);
+		assert_eq!(approved_since(r), 12);
 	});
 }
 
@@ -121,8 +121,8 @@ fn instaconfirm_then_reconfirm_with_voting_trigger_works() {
 		set_tally(r, 100, 0);
 		run_to(9);
 		assert_eq!(confirming_until(r), 11);
-		run_to(11);
-		assert_eq!(approved_since(r), 11);
+		run_to(12);
+		assert_eq!(approved_since(r), 12);
 	});
 }
 
@@ -132,21 +132,22 @@ fn voting_should_extend_for_late_confirmation() {
 		let r = Passing.create();
 		run_to(10);
 		assert_eq!(confirming_until(r), 11);
-		run_to(11);
-		assert_eq!(approved_since(r), 11);
+		run_to(12);
+		assert_eq!(approved_since(r), 12);
 	});
 }
 
 #[test]
-fn should_instafail_during_extension_confirmation() {
+fn should_fails_during_extension_confirmation_if_on_candle() {
 	ExtBuilder::default().build_and_execute(|| {
 		let r = Passing.create();
 		run_to(10);
 		assert_eq!(confirming_until(r), 11);
-		// Should insta-fail since it's now past the normal voting time.
+		TestRandomness::place_candle();
+		// Should record failure. I'll fail anyways
 		set_tally(r, 100, 101);
-		run_to(11);
-		assert_eq!(rejected_since(r), 11);
+		run_to(12);
+		assert_eq!(rejected_since(r), 12);
 	});
 }
 
@@ -162,6 +163,41 @@ fn confirming_then_fail_works() {
 		set_tally(r, 100, 101);
 		run_to(9);
 		assert_eq!(rejected_since(r), 9);
+	});
+}
+
+// TODO: Add a new test to decide using candle method
+// Note: use a deterministic (i.e. manually set the seed)
+// method to be able to accurately determine which is
+// the "winner" block
+#[test]
+fn confirming_decided_by_candle() {
+	ExtBuilder::default().build_and_execute(|| {
+		let r = Passing.create_long();
+		// Normally ends at 5 + 4 (voting period) = 9.
+		assert_eq!(deciding_and_failing_since(r), 2);
+		run_to(16);
+		assert_eq!(confirming_until(r), 23);
+		run_to(19);
+		TestRandomness::place_candle();
+		run_to(20);
+		set_tally(r, 100, 101);
+		run_to(24);
+		assert_eq!(approved_since(r), 24);
+	});
+
+	ExtBuilder::default().build_and_execute(|| {
+		let r = Passing.create_long();
+		// Normally ends at 5 + 4 (voting period) = 9.
+		assert_eq!(deciding_and_failing_since(r), 2);
+		run_to(16);
+		assert_eq!(confirming_until(r), 23);
+		run_to(20);
+		set_tally(r, 100, 101);
+		run_to(21);
+		TestRandomness::place_candle();
+		run_to(24);
+		assert_eq!(rejected_since(r), 24);
 	});
 }
 
@@ -231,35 +267,34 @@ fn queueing_works() {
 		println!("{:?}", Vec::<_>::from(TrackQueue::<Test>::get(0)));
 
 		// Let confirmation period end.
-		run_to(9);
+		run_to(10);
 
 		// #4 should have been confirmed.
-		assert_eq!(approved_since(4), 9);
+		assert_eq!(approved_since(4), 10);
 
 		// On to the next block to select the new referendum
-		run_to(10);
+		run_to(11);
 		// #1 (the one with the most approvals) should now be being decided.
-		assert_eq!(deciding_since(1), 10);
+		assert_eq!(deciding_since(1), 11);
 
 		// Let it end unsuccessfully.
-		run_to(14);
-		assert_eq!(rejected_since(1), 14);
+		run_to(15);
+		assert_eq!(rejected_since(1), 15);
 
 		// Service queue.
-		run_to(15);
+		run_to(16);
 		// #2 should now be being decided. It will (barely) pass.
-		assert_eq!(deciding_and_failing_since(2), 15);
+		assert_eq!(deciding_and_failing_since(2), 16);
 
 		// #2 moves into confirming at the last moment with a 50% approval.
-		run_to(19);
-		assert_eq!(confirming_until(2), 21);
+		run_to(20);
+		assert_eq!(confirming_until(2), 22);
 
 		// #2 gets approved.
-		run_to(21);
-		assert_eq!(approved_since(2), 21);
+		run_to(23);
+		assert_eq!(approved_since(2), 23);
 
 		// The final one has since timed out.
-		run_to(22);
 		assert_eq!(timed_out_since(3), 22);
 	});
 }
