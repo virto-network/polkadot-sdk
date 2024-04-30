@@ -245,11 +245,11 @@ pub enum RuntimeCosts {
 	/// Weight of calling `account_reentrance_count`
 	AccountEntranceCount,
 	/// Weight of calling `instantiation_nonce`
-	InstantationNonce,
-	/// Weight of calling `add_delegate_dependency`
-	AddDelegateDependency,
-	/// Weight of calling `remove_delegate_dependency`
-	RemoveDelegateDependency,
+	InstantiationNonce,
+	/// Weight of calling `lock_delegate_dependency`
+	LockDelegateDependency,
+	/// Weight of calling `unlock_delegate_dependency`
+	UnlockDelegateDependency,
 }
 
 impl<T: Config> Token<T> for RuntimeCosts {
@@ -337,9 +337,9 @@ impl<T: Config> Token<T> for RuntimeCosts {
 			EcdsaToEthAddress => s.ecdsa_to_eth_address,
 			ReentrantCount => s.reentrance_count,
 			AccountEntranceCount => s.account_reentrance_count,
-			InstantationNonce => s.instantiation_nonce,
-			AddDelegateDependency => s.add_delegate_dependency,
-			RemoveDelegateDependency => s.remove_delegate_dependency,
+			InstantiationNonce => s.instantiation_nonce,
+			LockDelegateDependency => s.lock_delegate_dependency,
+			UnlockDelegateDependency => s.unlock_delegate_dependency,
 		}
 	}
 }
@@ -987,7 +987,6 @@ impl<'a, E: Ext + 'a> Runtime<'a, E> {
 // for every function.
 #[define_env(doc)]
 pub mod env {
-
 	/// Set the value at the given key in the contract storage.
 	/// See [`pallet_contracts_uapi::HostFn::set_storage`]
 	#[prefixed_alias]
@@ -1216,7 +1215,6 @@ pub mod env {
 	/// Make a call to another contract.
 	/// See [`pallet_contracts_uapi::HostFn::call_v2`].
 	#[version(2)]
-	#[unstable]
 	fn call(
 		ctx: _,
 		memory: _,
@@ -1353,7 +1351,6 @@ pub mod env {
 	/// Instantiate a contract with the specified code hash.
 	/// See [`pallet_contracts_uapi::HostFn::instantiate_v2`].
 	#[version(2)]
-	#[unstable]
 	fn instantiate(
 		ctx: _,
 		memory: _,
@@ -2107,7 +2104,6 @@ pub mod env {
 
 	/// Execute an XCM program locally, using the contract's address as the origin.
 	/// See [`pallet_contracts_uapi::HostFn::execute_xcm`].
-	#[unstable]
 	fn xcm_execute(
 		ctx: _,
 		memory: _,
@@ -2146,7 +2142,6 @@ pub mod env {
 
 	/// Send an XCM program from the contract to the specified destination.
 	/// See [`pallet_contracts_uapi::HostFn::send_xcm`].
-	#[unstable]
 	fn xcm_send(
 		ctx: _,
 		memory: _,
@@ -2301,27 +2296,25 @@ pub mod env {
 	/// Returns a nonce that is unique per contract instantiation.
 	/// See [`pallet_contracts_uapi::HostFn::instantiation_nonce`].
 	fn instantiation_nonce(ctx: _, _memory: _) -> Result<u64, TrapReason> {
-		ctx.charge_gas(RuntimeCosts::InstantationNonce)?;
+		ctx.charge_gas(RuntimeCosts::InstantiationNonce)?;
 		Ok(ctx.ext.nonce())
 	}
 
 	/// Adds a new delegate dependency to the contract.
-	/// See [`pallet_contracts_uapi::HostFn::add_delegate_dependency`].
-	#[unstable]
-	fn add_delegate_dependency(ctx: _, memory: _, code_hash_ptr: u32) -> Result<(), TrapReason> {
-		ctx.charge_gas(RuntimeCosts::AddDelegateDependency)?;
+	/// See [`pallet_contracts_uapi::HostFn::lock_delegate_dependency`].
+	fn lock_delegate_dependency(ctx: _, memory: _, code_hash_ptr: u32) -> Result<(), TrapReason> {
+		ctx.charge_gas(RuntimeCosts::LockDelegateDependency)?;
 		let code_hash = ctx.read_sandbox_memory_as(memory, code_hash_ptr)?;
-		ctx.ext.add_delegate_dependency(code_hash)?;
+		ctx.ext.lock_delegate_dependency(code_hash)?;
 		Ok(())
 	}
 
 	/// Removes the delegate dependency from the contract.
-	/// see [`pallet_contracts_uapi::HostFn::remove_delegate_dependency`].
-	#[unstable]
-	fn remove_delegate_dependency(ctx: _, memory: _, code_hash_ptr: u32) -> Result<(), TrapReason> {
-		ctx.charge_gas(RuntimeCosts::RemoveDelegateDependency)?;
+	/// see [`pallet_contracts_uapi::HostFn::unlock_delegate_dependency`].
+	fn unlock_delegate_dependency(ctx: _, memory: _, code_hash_ptr: u32) -> Result<(), TrapReason> {
+		ctx.charge_gas(RuntimeCosts::UnlockDelegateDependency)?;
 		let code_hash = ctx.read_sandbox_memory_as(memory, code_hash_ptr)?;
-		ctx.ext.remove_delegate_dependency(&code_hash)?;
+		ctx.ext.unlock_delegate_dependency(&code_hash)?;
 		Ok(())
 	}
 }
