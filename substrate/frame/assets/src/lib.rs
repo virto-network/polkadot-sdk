@@ -262,6 +262,9 @@ pub mod pallet {
 			type Extra = ();
 			type CallbackHandle = ();
 			type WeightInfo = ();
+			type MaxHolds = ConstU32<50>;
+			#[inject_runtime_type]
+			type RuntimeHoldReason = ();
 			#[cfg(feature = "runtime-benchmarks")]
 			type BenchmarkHelper = ();
 		}
