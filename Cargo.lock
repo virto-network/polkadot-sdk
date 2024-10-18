@@ -16645,6 +16645,7 @@ dependencies = [
  "sp-runtime",
  "sp-session",
  "sp-staking",
+ "sp-std",
  "sp-storage",
  "sp-tracing",
  "sp-transaction-pool",
