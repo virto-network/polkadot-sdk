@@ -313,6 +313,7 @@ members = [
 	"substrate/frame/asset-rate",
 	"substrate/frame/assets",
 	"substrate/frame/assets-freezer",
+	"substrate/frame/assets-holder",
 	"substrate/frame/atomic-swap",
 	"substrate/frame/aura",
 	"substrate/frame/authority-discovery",
@@ -877,6 +878,7 @@ pallet-asset-rate = { path = "substrate/frame/asset-rate", default-features = fa
 pallet-asset-tx-payment = { path = "substrate/frame/transaction-payment/asset-tx-payment", default-features = false, version = "38.0.0" }
 pallet-assets = { path = "substrate/frame/assets", default-features = false, version = "40.0.0" }
 pallet-assets-freezer = { path = "substrate/frame/assets-freezer", default-features = false, version = "0.5.0" }
+pallet-assets-holder = { path = "substrate/frame/assets-holder", default-features = false, version = "0.1.0" }
 pallet-atomic-swap = { default-features = false, path = "substrate/frame/atomic-swap" }
 pallet-aura = { path = "substrate/frame/aura", default-features = false, version = "37.0.0" }
 pallet-authority-discovery = { path = "substrate/frame/authority-discovery", default-features = false, version = "38.0.0" }
