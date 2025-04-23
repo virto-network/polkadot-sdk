@@ -68,6 +68,7 @@ std = [
 	"sp-std/std",
 	"sp-weights/std",
 	"tracing/std",
+	"either/std"
 ]
 
 # Serde support without relying on std features.
